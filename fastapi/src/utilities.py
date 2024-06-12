@@ -37,7 +37,7 @@ def get_jupyter_token(jupyter_hub_type="LOCAL"):
 def build_jupyter_url(url):
     # Build a valid Jupyter URL
     # Get the Jupyter token
-    token = get_jupyter_token(os.getenv('JUPYTER_HUB_TYPE'))
+    token = get_jupyter_token(os.getenv("JUPYTER_HUB_TYPE"))
     # Concat the URL and the token
     parsed_url = urlparse(url + "?token=" + token)
     if not all([parsed_url.scheme, parsed_url.netloc, parsed_url.query]):
