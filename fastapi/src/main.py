@@ -14,8 +14,8 @@ from datetime import datetime
 
 from typing import List
 from jupyter_client.kernelspec import KernelSpecManager
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, HTTPException, Request
-from urllib.parse import urlparse, urlunparse, urljoin
 from pydantic_data_models import PartialExecBody, ExecOutput, KernelInfo
 from sse_starlette.sse import EventSourceResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,15 +23,26 @@ from utilities import build_jupyter_url
 
 # load parameters from .env file
 load_dotenv()
-STREAM_DELAY = float(os.getenv('STREAM_DELAY'))
-MAX_NUMBER_KERNELS = os.getenv('MAX_NUMBER_KERNELS')
-RETRY_TIMEOUT = os.getenv('RETRY_TIMEOUT')
+STREAM_DELAY = float(os.getenv("STREAM_DELAY"))
+MAX_NUMBER_KERNELS = os.getenv("MAX_NUMBER_KERNELS")
+RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT")
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("STARTING UP")
+    yield
+    print("SHUTDOWN")
+    for kernel_id, ws in kernel_websockets.items():
+        try:
+            if ws is not None and not ws.closed:
+                await ws.close()
+        except Exception as e:
+            print(f"Error closing websocket for kernel {kernel_id}")
 
 
 # start FasAPI server and add CORS middleware
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allows all origins
@@ -43,17 +54,18 @@ app.add_middleware(
 parser = argparse.ArgumentParser(description="SageKernelServer")
 parser.add_argument("--url", type=str, help="URL to be used in routes")
 args = parser.parse_args()
-url = args.url # Get the Jupyter Server URL
+url = args.url  # Get the Jupyter Server URL
 
 
 parsed_url, base_url = build_jupyter_url(url)
-ws_base_url = parsed_url._replace(scheme="ws")
-ws_base_url = urlunparse(ws_base_url)
+
+# ws_base_url = parsed_url._replace(scheme="ws")
+# ws_base_url = urlunparse(ws_base_url)
+ws_base_url = base_url.replace("http", "ws")
 
 token = parsed_url.query.split("=")[-1]
 if not re.match(r"^token=\w{4,}$", parsed_url.query):
     raise ValueError("Invalid token")
-
 
 
 # Data structures to store the kernels and the websockets
@@ -70,6 +82,7 @@ def get_all_kernel_specs():
 outputs: dict[str, ExecOutput] = {}
 kernel_info_collection: dict[str, KernelInfo] = {}
 kernel2msg_id: dict[str, List] = {}
+
 
 async def check_messages(websocket):
     while True:
@@ -186,7 +199,6 @@ async def check_messages(websocket):
                         )
                 outputs[msg_id].last_update_time = message_data["header"]["date"]
 
-
     return outputs
 
 
@@ -208,7 +220,7 @@ def get_kernels():
         "Referer": base_url,
     }
 
-    kernel_specs_url = urljoin(base_url, "/api/kernels")
+    kernel_specs_url = base_url + "/api/kernels"
     response = requests.get(kernel_specs_url, headers=headers)
 
     if response.status_code == 201 or response.status_code == 200:
@@ -232,7 +244,7 @@ async def get_kernelspecs():
         "Referer": base_url,
     }
 
-    kernel_specs_url = urljoin(base_url, "/api/kernelspecs")
+    kernel_specs_url = base_url + "/api/kernelspecs"
     response = requests.get(kernel_specs_url, headers=headers)
     if response.status_code != 201:
         return response.json()["kernelspecs"]
@@ -258,7 +270,7 @@ async def create_kernel(kernel_name: str, kernel_info: KernelInfo):
             detail=f"Maximum number of kernels reached. Please delete one of the existing kernels.",
         )
 
-    url = urljoin(base_url, "/api/kernels")
+    url = base_url + "/api/kernels"
     if not kernel_name:
         raise HTTPException(status_code=400, detail="Missing kernel_name")
 
@@ -273,7 +285,7 @@ async def create_kernel(kernel_name: str, kernel_info: KernelInfo):
         "Referer": base_url,
     }
 
-    kernel_specs_url = urljoin(base_url, "/api/kernelspecs")
+    kernel_specs_url = base_url + "/api/kernelspecs"
     response = requests.get(kernel_specs_url, headers=headers)
     if response.status_code != 201:  # ?????
         kernel_specs = response.json()["kernelspecs"]
@@ -306,10 +318,11 @@ async def create_kernel(kernel_name: str, kernel_info: KernelInfo):
 
         kernel_websockets[kernel_id] = None
         session_id = str(uuid.uuid4())
-        ws_url = urljoin(
-            ws_base_url, f"/api/kernels/{kernel_id}/channels?session_id={session_id}"
+        ws_url = (
+            ws_base_url + f"/api/kernels/{kernel_id}/channels?session_id={session_id}"
         )
 
+        print(f"Connecting to {ws_url}")
         kernel_websockets[kernel_id] = await websockets.connect(
             ws_url, extra_headers=headers, max_size=5 * 2**20
         )
@@ -346,7 +359,7 @@ async def delete_kernel(kernel_id: str):
         "X-XSRFToken": xsrf_token,
         "Referer": base_url,
     }
-    my_url = urljoin(base_url, f"/api/kernels/{kernel_id}")
+    my_url = base_url + f"/api/kernels/{kernel_id}"
     response = requests.delete(my_url, headers=headers)
 
     if response.status_code == 204:
@@ -365,11 +378,9 @@ async def delete_kernel(kernel_id: str):
 
 @app.post("/execute/{kernel_id}")
 async def execute_code(kernel_id: str, body: PartialExecBody):
-    # print(f"About to run Code {body.code} on kernel {kernel_id}")
     print(f"About to run code on kernel {kernel_id}")
 
     global kernel_websockets
-    # print(kernel_websockets)
 
     if kernel_id not in kernel_websockets:
         raise HTTPException(
@@ -381,9 +392,7 @@ async def execute_code(kernel_id: str, body: PartialExecBody):
         session_id = str(uuid.uuid4())
     session_to_kernel[session_id] = kernel_id
 
-    ws_url = urljoin(
-        ws_base_url, f"/api/kernels/{kernel_id}/channels?session_id={session_id}"
-    )
+    ws_url = ws_base_url + f"/api/kernels/{kernel_id}/channels?session_id={session_id}"
 
     if kernel_websockets[kernel_id] is None or kernel_websockets[kernel_id].closed:
         headers = {"Authorization": f"token {token}"}
@@ -397,7 +406,6 @@ async def execute_code(kernel_id: str, body: PartialExecBody):
         print(f"Connected to kernel {kernel_id}")
 
     msg_id = str(uuid.uuid4())
-    # print("msg_id = ", msg_id)
 
     message = {
         "header": {
@@ -426,6 +434,7 @@ async def execute_code(kernel_id: str, body: PartialExecBody):
     kernel2msg_id[kernel_id].append(msg_id)
     return {"msg_id": msg_id}
 
+
 @app.post("/interrupt/{kernel_id}")
 async def interrupt_execution(kernel_id: str):
     session = requests.Session()
@@ -438,13 +447,17 @@ async def interrupt_execution(kernel_id: str):
         "Referer": base_url,
     }
 
-    kernel_specs_url = urljoin(base_url, f"/api/kernels/{kernel_id}/interrupt")
+    kernel_specs_url = base_url + f"/api/kernels/{kernel_id}/interrupt"
 
     response = requests.post(kernel_specs_url, headers=headers)
 
     print("Interrupting kernel, returned cocde: ", response.status_code)
 
-    if response.status_code == 201 or response.status_code == 200 or response.status_code == 204:
+    if (
+        response.status_code == 201
+        or response.status_code == 200
+        or response.status_code == 204
+    ):
         # if len(kernel2msg_id[kernel_id]) > 0:
         #     msg_id = kernel2msg_id[kernel_id][-1]
         #     outputs[msg_id].msg_type = "error",
@@ -456,7 +469,6 @@ async def interrupt_execution(kernel_id: str):
         raise HTTPException(
             status_code=500, detail=f"Failed to get kernels {response.text}"
         )
-
 
 
 @app.post("/stop/{kernel_id}")
@@ -472,13 +484,11 @@ async def stop_kernel(kernel_id: str):
 # Restart kernel
 
 
-
-
 @app.post("/restart/{kernel_id}")
 async def restart_kernel(kernel_id: str):
     if kernel_id not in kernel_info_collection:
         raise HTTPException(status_code=400, detail="Kernel not started")
-    url = urljoin(base_url, f"/api/kernels/{kernel_id}/restart")
+    url = base_url + f"/api/kernels/{kernel_id}/restart"
     # Get the XSRF token
     session = requests.Session()
     response = session.get(base_url)
@@ -591,16 +601,6 @@ async def check_status_stream(request: Request, msg_id: str):
             await asyncio.sleep(STREAM_DELAY)
 
     return EventSourceResponse(event_generator(), headers=headers)
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    for kernel_id, ws in kernel_websockets.items():
-        try:
-            if ws is not None and not ws.closed:
-                await ws.close()
-        except Exception as e:
-            print(f"Error closing websocket for kernel {kernel_id}")
 
 
 if __name__ == "__main__":
