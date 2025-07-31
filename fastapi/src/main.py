@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     print("SHUTDOWN")
     for kernel_id, ws in kernel_websockets.items():
         try:
-            if ws is not None and not ws.closed:
+            if ws is not None:
                 await ws.close()
         except Exception as e:
             print(f"Error closing websocket for kernel {kernel_id}")
@@ -129,11 +129,15 @@ async def check_messages(websocket):
             # break
 
         message_data = json.loads(message)
-        # print(message_data)
         if "parent_header" in message_data:
             msg_id = message_data["parent_header"]["msg_id"]
             session_id = message_data["parent_header"]["session"]
-            start_time = message_data["parent_header"]["date"]
+            # when R, no date is provided, so we set it to 0
+            start_time = (
+                message_data["parent_header"]["date"]
+                if "date" in message_data["parent_header"]
+                else "0"
+            )
 
             # ignore messages that we didn't send.
             # e.g., spontaneous messages from the kernel or
@@ -324,7 +328,7 @@ async def create_kernel(kernel_name: str, kernel_info: KernelInfo):
 
         print(f"Connecting to {ws_url}")
         kernel_websockets[kernel_id] = await websockets.connect(
-            ws_url, extra_headers=headers, max_size=5 * 2**20
+            ws_url, additional_headers=headers, max_size=5 * 2**20
         )
         asyncio.create_task(
             check_messages(
@@ -394,7 +398,7 @@ async def execute_code(kernel_id: str, body: PartialExecBody):
 
     ws_url = ws_base_url + f"/api/kernels/{kernel_id}/channels?session_id={session_id}"
 
-    if kernel_websockets[kernel_id] is None or kernel_websockets[kernel_id].closed:
+    if kernel_websockets[kernel_id] is None:
         headers = {"Authorization": f"token {token}"}
         kernel_websockets[kernel_id] = await websockets.connect(
             ws_url, extra_headers=headers
