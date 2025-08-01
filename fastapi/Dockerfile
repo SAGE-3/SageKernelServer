@@ -1,6 +1,9 @@
 FROM python:3.13-slim
 
-RUN apt update && apt upgrade && apt install -y curl && rm -rf /var/lib/apt/lists/*
+RUN apt update
+RUN apt upgrade
+RUN apt install -y curl
+RUN rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
